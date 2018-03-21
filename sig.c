@@ -128,6 +128,7 @@ struct termsig {
      int signum;
      SigHandler *orig_handler;
      int orig_flags;
+     int core_dump;
 };
 
 #define NULL_HANDLER (SigHandler *)SIG_DFL
@@ -145,15 +146,15 @@ static struct termsig terminating_signals[] = {
 #endif
 
 #ifdef SIGILL
-{  SIGILL, NULL_HANDLER, 0 },
+{  SIGILL, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGTRAP
-{  SIGTRAP, NULL_HANDLER, 0 },
+{  SIGTRAP, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGIOT
-{  SIGIOT, NULL_HANDLER, 0 },
+{  SIGIOT, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGDANGER
@@ -165,19 +166,19 @@ static struct termsig terminating_signals[] = {
 #endif
 
 #ifdef SIGFPE
-{  SIGFPE, NULL_HANDLER, 0 },
+{  SIGFPE, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGBUS
-{  SIGBUS, NULL_HANDLER, 0 },
+{  SIGBUS, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGSEGV
-{  SIGSEGV, NULL_HANDLER, 0 },
+{  SIGSEGV, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGSYS
-{  SIGSYS, NULL_HANDLER, 0 },
+{  SIGSYS, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGPIPE
@@ -193,11 +194,11 @@ static struct termsig terminating_signals[] = {
 #endif
 
 #ifdef SIGXCPU
-{  SIGXCPU, NULL_HANDLER, 0 },
+{  SIGXCPU, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGXFSZ
-{  SIGXFSZ, NULL_HANDLER, 0 },
+{  SIGXFSZ, NULL_HANDLER, 0, 1 },
 #endif
 
 #ifdef SIGVTALRM
@@ -228,6 +229,7 @@ static struct termsig terminating_signals[] = {
 #define XSIG(x) (terminating_signals[x].signum)
 #define XHANDLER(x) (terminating_signals[x].orig_handler)
 #define XSAFLAGS(x) (terminating_signals[x].orig_flags)
+#define XCOREDUMP(x) (terminating_signals[x].core_dump)
 
 static int termsigs_initialized = 0;
 
@@ -375,7 +377,6 @@ reset_terminating_signals ()
 
   termsigs_initialized = 0;
 }
-#undef XSIG
 #undef XHANDLER
 
 /* Run some of the cleanups that should be performed when we run
@@ -557,6 +558,8 @@ termsig_handler (sig)
      int sig;
 {
   static int handling_termsig = 0;
+  int core_dump, i;
+  sigset_t mask;
 
   /* Simple semaphore to keep this function from being executed multiple
      times.  Since we no longer are running as a signal handler, we don't
@@ -598,9 +601,35 @@ termsig_handler (sig)
   executing_list = comsub_ignore_return = return_catch_flag = wait_intr_flag = 0;
 
   run_exit_trap ();	/* XXX - run exit trap possibly in signal context? */
+
   set_signal_handler (sig, SIG_DFL);
+  sigprocmask (SIG_SETMASK, (sigset_t *)NULL, &mask);
+  sigdelset (&mask, sig);
+  sigprocmask (SIG_SETMASK, &mask, (sigset_t *)NULL);
+
   kill (getpid (), sig);
+
+  /* The previous signal had to kill this process, but it is still alive.
+     We know that this can happen in Linux, if bash is running as an init
+     process in a pid namespace, in this case the process can't kill
+     itself (man 7 pid_namespaces). */
+
+  core_dump = 0;
+  sigprocmask (SIG_SETMASK, (sigset_t *)NULL, &mask);
+  for (i = 0; i < TERMSIGS_LENGTH; i++) {
+    set_signal_handler (XSIG(i), SIG_DFL);
+    sigdelset (&mask, XSIG (i));
+    if (sig == XSIG(i))
+      core_dump = XCOREDUMP(i);
+  }
+  sigprocmask (SIG_SETMASK, &mask, (sigset_t *)NULL);
+
+  if (core_dump)
+    *((volatile unsigned long *) NULL) = 0xdead0000 + sig;
+
+  exit(EX_KILLED);
 }
+#undef XSIG
 
 /* What we really do when SIGINT occurs. */
 sighandler
